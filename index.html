@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>切水果遊戲</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117; /* Dark background */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        #gameContainer {
+            box-shadow: 0 10px 30px rgba(0, 255, 128, 0.2);
+            border: 4px solid #00ff80; /* Neon green border */
+            border-radius: 1rem;
+            overflow: hidden;
+        }
+        #gameCanvas {
+            background: linear-gradient(to bottom, #161b22, #0d1117);
+            display: block;
+            touch-action: none; /* Crucial for preventing default touch behaviors */
+        }
+        .game-button {
+            transition: all 0.15s ease;
+            box-shadow: 0 4px #00a857;
+        }
+        .game-button:active {
+            box-shadow: 0 0 #00a857;
+            transform: translateY(4px);
+        }
+        /* Custom message box styling */
+        .message-box {
+            background-color: rgba(0, 0, 0, 0.85);
+            backdrop-filter: blur(5px);
+            border: 3px solid #00ff80;
+            color: white;
+            padding: 2rem;
+            border-radius: 1rem;
+            text-align: center;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="gameContainer" class="p-4 bg-gray-800 flex flex-col items-center">
+        <div id="scoreDisplay" class="text-white text-2xl font-bold mb-4 w-full text-center">
+            分數: 0 | 失誤: 0/3
+        </div>
+        <canvas id="gameCanvas" width="800" height="600"></canvas>
+        <div id="controlPanel" class="mt-4 flex space-x-4">
+            <button id="startButton" class="game-button bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-6 rounded-lg text-lg">
+                開始遊戲
+            </button>
+            <button id="restartButton" class="game-button bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-6 rounded-lg text-lg hidden">
+                重新開始
+            </button>
+        </div>
+    </div>
+
+    <!-- Game Over/Start Message Box -->
+    <div id="messageOverlay" class="fixed inset-0 flex items-center justify-center hidden">
+        <div id="messageBox" class="message-box max-w-sm">
+            <h2 id="messageTitle" class="text-3xl font-extrabold mb-4 text-green-400">切水果</h2>
+            <p id="messageText" class="mb-6 text-lg">
+                切開所有水果，但要小心炸彈！滑動或點擊螢幕來切水果。
+            </p>
+            <button id="overlayStartButton" class="game-button bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-8 rounded-lg text-xl">
+                開始遊戲
+            </button>
+        </div>
+    </div>
+
+
+    <script type="module">
+        // --- 遊戲設定與常數 ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreDisplay = document.getElementById('scoreDisplay');
+        const startButton = document.getElementById('startButton');
+        const restartButton = document.getElementById('restartButton');
+        const messageOverlay = document.getElementById('messageOverlay');
+        const overlayStartButton = document.getElementById('overlayStartButton');
+
+        const GRAVITY = 0.5;
+        const SLICE_TRAIL_LENGTH = 10;
+        const FRUIT_COLORS = {
+            'apple': '#ff4d4d', // Red
+            'orange': '#ff9933', // Orange
+            'watermelon': '#66cc66', // Green
+            'banana': '#ffdb4d' // Yellow
+        };
+        const BOMB_COLOR = '#333333';
+        const MAX_MISSES = 3;
+
+        // --- 遊戲狀態 ---
+        let gameState = {
+            score: 0,
+            misses: 0,
+            fruits: [],
+            sliceTrail: [],
+            isSlicing: false,
+            lastFrameTime: 0,
+            isRunning: false,
+            gameOver: true,
+            sliceSound: null,
+            bombSound: null
+        };
+        
+        // Polyfill for random UUID (for consistent keying/tracking if needed)
+        if (typeof crypto.randomUUID === 'undefined') {
+            crypto.randomUUID = () => {
+                return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                    const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+                    return v.toString(16);
+                });
+            };
+        }
+
+        // --- 輔助函數：PCM 轉 WAV (用於播放音效) ---
+        /**
+         * 將 Base64 編碼的音頻數據轉換為 ArrayBuffer
+         * @param {string} base64 The base64 string
+         * @returns {ArrayBuffer}
+         */
+        const base64ToArrayBuffer = (base64) => {
+            const binaryString = atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        };
+
+        /**
+         * 將 16 位元 PCM 數據轉換為 WAV Blob
+         * @param {Int16Array} pcm16 Audio data
+         * @param {number} sampleRate Sample rate (e.g., 24000)
+         * @returns {Blob} WAV Blob
+         */
+        const pcmToWav = (pcm16, sampleRate) => {
+            const numChannels = 1;
+            const bytesPerSample = 2; // 16-bit PCM
+
+            const pcmLength = pcm16.length * bytesPerSample;
+            const buffer = new ArrayBuffer(44 + pcmLength);
+            const view = new DataView(buffer);
+
+            const writeString = (view, offset, string) => {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
+                }
+            };
+
+            // RIFF chunk descriptor
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, 36 + pcmLength, true);
+            writeString(view, 8, 'WAVE');
+
+            // FMT sub-chunk
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true); // Sub-chunk size
+            view.setUint16(20, 1, true); // Audio format (1 for PCM)
+            view.setUint16(22, numChannels, true); // Number of channels
+            view.setUint32(24, sampleRate, true); // Sample rate
+            view.setUint32(28, sampleRate * numChannels * bytesPerSample, true); // Byte rate
+            view.setUint16(32, numChannels * bytesPerSample, true); // Block align
+            view.setUint16(34, 16, true); // Bits per sample
+
+            // Data sub-chunk
+            writeString(view, 36, 'data');
+            view.setUint32(40, pcmLength, true); // Data size
+
+            // Write the PCM data
+            let offset = 44;
+            for (let i = 0; i < pcm16.length; i++, offset += bytesPerSample) {
+                view.setInt16(offset, pcm16[i], true);
+            }
+
+            return new Blob([view], { type: 'audio/wav' });
+        };
+
+
+        // --- 音效生成 (TTS API) ---
+        const generateAndPlaySound = async (prompt, voiceName, stateKey) => {
+            const model = "gemini-2.5-flash-preview-tts";
+            const apiKey = "";
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+            const payload = {
+                contents: [{
+                    parts: [{ text: prompt }]
+                }],
+                generationConfig: {
+                    responseModalities: ["AUDIO"],
+                    speechConfig: {
+                        voiceConfig: {
+                            prebuiltVoiceConfig: { voiceName: voiceName }
+                        }
+                    }
+                },
+            };
+
+            const MAX_RETRIES = 5;
+            let currentRetry = 0;
+
+            const makeApiCall = async () => {
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok && currentRetry < MAX_RETRIES) {
+                    currentRetry++;
+                    const delay = Math.pow(2, currentRetry) * 1000;
+                    // console.warn(`API call failed (status: ${response.status}). Retrying in ${delay}ms...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    return makeApiCall(); // Recursive retry
+                }
+                
+                if (!response.ok) {
+                    throw new Error(`TTS API failed after ${MAX_RETRIES} attempts: ${response.statusText}`);
+                }
+
+                const result = await response.json();
+                const part = result?.candidates?.[0]?.content?.parts?.[0];
+                const audioData = part?.inlineData?.data;
+                const mimeType = part?.inlineData?.mimeType;
+
+                if (audioData && mimeType && mimeType.startsWith("audio/L16")) {
+                    // Extract sample rate from mimeType (e.g., audio/L16;rate=24000)
+                    const rateMatch = mimeType.match(/rate=(\d+)/);
+                    const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+                    
+                    const pcmData = base64ToArrayBuffer(audioData);
+                    const pcm16 = new Int16Array(pcmData);
+                    
+                    const wavBlob = pcmToWav(pcm16, sampleRate);
+                    const audioUrl = URL.createObjectURL(wavBlob);
+                    
+                    // Create and store the Audio object
+                    const audio = new Audio(audioUrl);
+                    gameState[stateKey] = audio;
+
+                } else {
+                    console.error("Invalid TTS response structure or mimeType:", result);
+                }
+            };
+
+            try {
+                // Pre-generate the sounds for a better experience
+                await makeApiCall();
+            } catch (error) {
+                console.error("Error generating sound:", error);
+            }
+        };
+
+        // --- 實體 (水果/炸彈) 定義 ---
+        class Entity {
+            constructor(type, radius, color, isBomb = false) {
+                this.id = crypto.randomUUID();
+                this.type = type; // 'apple', 'bomb', 'half'
+                this.radius = radius;
+                this.color = color;
+                this.isBomb = isBomb;
+                this.x = canvas.width / 2; // Start at center bottom
+                this.y = canvas.height;
+                this.vx = (Math.random() - 0.5) * 8; // Random horizontal velocity
+                this.vy = -(20 + Math.random() * 5); // Strong upward velocity
+                this.isSliced = false;
+                this.rotation = 0;
+                this.vRotation = (Math.random() - 0.5) * 0.1; // Rotational velocity
+            }
+
+            update() {
+                this.vy += GRAVITY;
+                this.x += this.vx;
+                this.y += this.vy;
+                this.rotation += this.vRotation;
+
+                // Check if missed (only if it hasn't been sliced and is off-screen)
+                if (!this.isSliced && !this.isBomb && this.y > canvas.height + this.radius && this.type !== 'half') {
+                    // console.log(`${this.type} missed`);
+                    this.isSliced = true; // Mark as sliced so it doesn't count again
+                    return 'miss';
+                }
+                return 'ok';
+            }
+
+            draw(ctx) {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.rotation);
+
+                ctx.beginPath();
+                ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.fill();
+
+                // Draw a simple highlight to make it look round
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+                ctx.arc(-this.radius * 0.3, -this.radius * 0.3, this.radius * 0.2, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // If bomb, draw a fuse/skull
+                if (this.isBomb) {
+                    ctx.fillStyle = '#111';
+                    ctx.fillRect(-5, -this.radius - 5, 10, 10);
+                }
+
+                ctx.restore();
+            }
+        }
+
+        // --- 遊戲邏輯 ---
+
+        let gameLoopInterval;
+        let fruitSpawnTimer;
+
+        function updateScore(type = 'hit') {
+            if (type === 'hit') {
+                gameState.score += 10;
+                // Play slice sound
+                if (gameState.sliceSound) {
+                    gameState.sliceSound.currentTime = 0;
+                    gameState.sliceSound.play().catch(e => console.error("Sound play failed:", e));
+                }
+            } else if (type === 'miss') {
+                gameState.misses++;
+            }
+            updateDisplay();
+        }
+
+        function updateDisplay() {
+            scoreDisplay.textContent = `分數: ${gameState.score} | 失誤: ${gameState.misses}/${MAX_MISSES}`;
+        }
+
+        function createFruit() {
+            const fruitTypes = Object.keys(FRUIT_COLORS);
+            const isBomb = Math.random() < 0.15; // 15% chance of a bomb
+            let type, color;
+
+            if (isBomb) {
+                type = 'bomb';
+                color = BOMB_COLOR;
+            } else {
+                type = fruitTypes[Math.floor(Math.random() * fruitTypes.length)];
+                color = FRUIT_COLORS[type];
+            }
+
+            const fruit = new Entity(type, isBomb ? 25 : 30, color, isBomb);
+
+            // Adjust starting X position to be slightly random but still near the bottom center
+            fruit.x = canvas.width / 2 + (Math.random() - 0.5) * 50;
+
+            // Adjust initial vertical velocity based on size
+            fruit.vy = -(20 + Math.random() * 8);
+
+            gameState.fruits.push(fruit);
+        }
+
+        function startGame() {
+            if (gameState.isRunning) return;
+
+            // Reset state
+            gameState.score = 0;
+            gameState.misses = 0;
+            gameState.fruits = [];
+            gameState.sliceTrail = [];
+            gameState.isSlicing = false;
+            gameState.isRunning = true;
+            gameState.gameOver = false;
+            gameState.lastFrameTime = performance.now();
+            
+            // Hide message box and update buttons
+            messageOverlay.classList.add('hidden');
+            startButton.classList.add('hidden');
+            restartButton.classList.remove('hidden');
+
+            updateDisplay();
+
+            // Start main game loop (requestAnimationFrame for smoother animation)
+            gameLoop(performance.now());
+
+            // Start fruit spawning
+            fruitSpawnTimer = setInterval(() => {
+                if (gameState.isRunning) {
+                    // Sometimes spawn multiple fruits at once
+                    const count = Math.random() < 0.2 ? 2 : 1;
+                    for (let i = 0; i < count; i++) {
+                        createFruit();
+                    }
+                }
+            }, 1000 + Math.random() * 500); // 1.0 to 1.5 seconds interval
+        }
+
+        function endGame(reason) {
+            if (!gameState.isRunning) return;
+            
+            gameState.isRunning = false;
+            gameState.gameOver = true;
+            
+            clearInterval(fruitSpawnTimer);
+            cancelAnimationFrame(gameLoopInterval);
+
+            // Show Game Over message
+            messageOverlay.classList.remove('hidden');
+            document.getElementById('messageTitle').textContent = reason === 'bomb' ? '遊戲結束 - 炸彈' : '遊戲結束';
+            document.getElementById('messageText').innerHTML = reason === 'bomb' 
+                ? `你切到了炸彈！<br>最終得分: ${gameState.score}` 
+                : `失誤太多！<br>最終得分: ${gameState.score}`;
+            overlayStartButton.textContent = '重新開始';
+            
+            // Update buttons in control panel
+            startButton.classList.remove('hidden');
+            restartButton.classList.add('hidden');
+        }
+
+        function checkSliceCollision(fruit, sliceStart, sliceEnd) {
+            // Simple distance check: is the fruit center close to the slice segment?
+            // This is a rough approximation but good enough for a simple game.
+            
+            // Vector from slice start to end
+            const v = { x: sliceEnd.x - sliceStart.x, y: sliceEnd.y - sliceStart.y };
+            // Vector from slice start to fruit center
+            const w = { x: fruit.x - sliceStart.x, y: fruit.y - sliceStart.y };
+
+            const c1 = w.x * v.x + w.y * v.y;
+            
+            // If c1 < 0, the closest point on the line is before the start point.
+            if (c1 <= 0) {
+                const distSq = w.x * w.x + w.y * w.y;
+                return distSq <= fruit.radius * fruit.radius;
+            }
+
+            const c2 = v.x * v.x + v.y * v.y;
+            
+            // If c2 < c1, the closest point is after the end point.
+            if (c2 < c1) {
+                const dx = fruit.x - sliceEnd.x;
+                const dy = fruit.y - sliceEnd.y;
+                const distSq = dx * dx + dy * dy;
+                return distSq <= fruit.radius * fruit.radius;
+            }
+
+            // Closest point is on the segment
+            const b = c1 / c2;
+            const closestX = sliceStart.x + b * v.x;
+            const closestY = sliceStart.y + b * v.y;
+
+            const dx = fruit.x - closestX;
+            const dy = fruit.y - closestY;
+            const distSq = dx * dx + dy * dy;
+
+            return distSq <= fruit.radius * fruit.radius;
+        }
+
+        function processSlices() {
+            if (gameState.sliceTrail.length < 2) return;
+
+            const sliceEnd = gameState.sliceTrail[gameState.sliceTrail.length - 1];
+            const sliceStart = gameState.sliceTrail[gameState.sliceTrail.length - 2];
+
+            for (let i = gameState.fruits.length - 1; i >= 0; i--) {
+                const fruit = gameState.fruits[i];
+                if (fruit.isSliced) continue;
+
+                if (checkSliceCollision(fruit, sliceStart, sliceEnd)) {
+                    fruit.isSliced = true;
+                    
+                    if (fruit.isBomb) {
+                        // Game Over!
+                        if (gameState.bombSound) {
+                            gameState.bombSound.currentTime = 0;
+                            gameState.bombSound.play().catch(e => console.error("Bomb sound play failed:", e));
+                        }
+                        endGame('bomb');
+                        return;
+                    }
+                    
+                    updateScore('hit');
+
+                    // Create two "half" pieces
+                    for (let j = 0; j < 2; j++) {
+                        const half = new Entity('half', fruit.radius / 1.5, fruit.color);
+                        half.x = fruit.x;
+                        half.y = fruit.y;
+                        half.vy = fruit.vy + (j === 0 ? -5 : 5); // Separate upward velocity
+                        half.vx = fruit.vx + (j === 0 ? -5 : 5); // Separate horizontal velocity
+                        half.vRotation = fruit.vRotation * 2;
+                        gameState.fruits.push(half);
+                    }
+
+                    // Remove the original fruit (and the halves will be cleaned up later)
+                    // The main fruit is only marked as sliced here, but will be filtered out in the main loop.
+                }
+            }
+        }
+
+        function gameLoop(timestamp) {
+            gameLoopInterval = requestAnimationFrame(gameLoop);
+            
+            const deltaTime = timestamp - gameState.lastFrameTime;
+            gameState.lastFrameTime = timestamp;
+
+            // 1. 清除畫面
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 2. 更新水果位置
+            let missesInFrame = 0;
+            gameState.fruits = gameState.fruits.filter(fruit => {
+                const status = fruit.update();
+                if (status === 'miss') {
+                    missesInFrame++;
+                    return false; // Remove missed fruit
+                }
+                
+                // Keep fruit if it's visible or recently launched (or a half-piece that is still visible)
+                const isOffScreen = fruit.y > canvas.height + fruit.radius || fruit.x < -fruit.radius || fruit.x > canvas.width + fruit.radius;
+                return !fruit.isSliced && !isOffScreen;
+            });
+            
+            // Check for game over due to misses
+            if (missesInFrame > 0) {
+                gameState.misses += missesInFrame;
+                updateDisplay();
+                if (gameState.misses >= MAX_MISSES) {
+                    endGame('miss');
+                    return;
+                }
+            }
+
+
+            // 3. 繪製水果
+            gameState.fruits.forEach(fruit => fruit.draw(ctx));
+            
+            // 4. 處理和繪製切痕
+            processSlices();
+            drawSliceTrail();
+            
+            // Remove old trail points
+            while (gameState.sliceTrail.length > SLICE_TRAIL_LENGTH) {
+                gameState.sliceTrail.shift();
+            }
+
+        }
+        
+        function drawSliceTrail() {
+            if (gameState.sliceTrail.length < 2) return;
+
+            ctx.lineWidth = 8;
+            ctx.lineCap = 'round';
+            
+            // Gradient trail for a cooler effect
+            const gradient = ctx.createLinearGradient(
+                gameState.sliceTrail[0].x, gameState.sliceTrail[0].y, 
+                gameState.sliceTrail[gameState.sliceTrail.length - 1].x, gameState.sliceTrail[gameState.sliceTrail.length - 1].y
+            );
+            gradient.addColorStop(0, 'rgba(255, 255, 255, 0)'); // Faded start
+            gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.8)'); // Bright middle
+            gradient.addColorStop(1, 'rgba(0, 255, 128, 1)'); // Neon green end
+            ctx.strokeStyle = gradient;
+
+            ctx.beginPath();
+            ctx.moveTo(gameState.sliceTrail[0].x, gameState.sliceTrail[0].y);
+            
+            for (let i = 1; i < gameState.sliceTrail.length; i++) {
+                ctx.lineTo(gameState.sliceTrail[i].x, gameState.sliceTrail[i].y);
+            }
+            ctx.stroke();
+        }
+
+        // --- 事件處理 ---
+        
+        function getCursorPosition(event) {
+            const rect = canvas.getBoundingClientRect();
+            let clientX, clientY;
+            
+            if (event.touches && event.touches.length > 0) {
+                // Handle touch events
+                clientX = event.touches[0].clientX;
+                clientY = event.touches[0].clientY;
+            } else {
+                // Handle mouse events
+                clientX = event.clientX;
+                clientY = event.clientY;
+            }
+            
+            return {
+                x: clientX - rect.left,
+                y: clientY - rect.top
+            };
+        }
+
+        function handleStart(event) {
+            if (gameState.gameOver) return;
+            event.preventDefault(); // Prevent scrolling/default touch actions
+            gameState.isSlicing = true;
+            gameState.sliceTrail = [];
+            const pos = getCursorPosition(event);
+            gameState.sliceTrail.push(pos);
+        }
+
+        function handleMove(event) {
+            if (!gameState.isSlicing || gameState.gameOver) return;
+            event.preventDefault(); 
+            const pos = getCursorPosition(event);
+            gameState.sliceTrail.push(pos);
+        }
+
+        function handleEnd() {
+            gameState.isSlicing = false;
+            // Clear trail after slice is done
+            // setTimeout(() => gameState.sliceTrail = [], 100); 
+        }
+
+        // Attach event listeners for mouse and touch
+        canvas.addEventListener('mousedown', handleStart);
+        canvas.addEventListener('mousemove', handleMove);
+        canvas.addEventListener('mouseup', handleEnd);
+        canvas.addEventListener('mouseleave', handleEnd); // Treat leaving canvas as ending slice
+        
+        canvas.addEventListener('touchstart', handleStart);
+        canvas.addEventListener('touchmove', handleMove);
+        canvas.addEventListener('touchend', handleEnd);
+        canvas.addEventListener('touchcancel', handleEnd);
+        
+        // Button handlers
+        startButton.addEventListener('click', () => {
+            startGame();
+        });
+        restartButton.addEventListener('click', () => {
+            startGame();
+        });
+        overlayStartButton.addEventListener('click', () => {
+            startGame();
+        });
+
+
+        // --- 初始化 ---
+        window.onload = async () => {
+            // Pre-generate audio (slice and bomb) using TTS
+            // Voice: Kore (Firm/Clear) or Puck (Upbeat)
+            await generateAndPlaySound("Say quickly: Swish!", "Kore", "sliceSound");
+            await generateAndPlaySound("Say dramatically: Bomb!", "Kore", "bombSound");
+            
+            // Show initial message overlay
+            messageOverlay.classList.remove('hidden');
+        };
+
+        // Handle window resize to keep canvas responsive (adjust only width/height attributes)
+        window.addEventListener('resize', () => {
+            // Note: For simplicity, we keep the canvas size fixed and centered.
+            // For a fully responsive design, you'd calculate new dimensions here
+            // and adjust the physics, which is complex. Sticking to fixed size is easier.
+        });
+
+
+    </script>
+</body>
+</html>
